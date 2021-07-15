@@ -54,6 +54,11 @@ namespace BundleSystem
         public static bool AutoReloadBundle { get; private set; } = true;
         public static bool LogMessages { get; set; }
         
+
+        public static string BaseLocalURL { get; private set; }
+        public static string BaseRemoteURL { get; private set; }
+        public static string BuildTarget { get; private set; }
+        
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         static void Setup()
         {
@@ -69,6 +74,7 @@ namespace BundleSystem
 #if UNITY_EDITOR
             SetupAssetdatabaseUsage();
             LocalURL = Utility.CombinePath(s_EditorBuildSettings.LocalOutputPath, UnityEditor.EditorUserBuildSettings.activeBuildTarget.ToString());
+            BaseLocalURL = s_EditorBuildSettings.LocalOutputPath;
 #endif
             if (Application.platform != RuntimePlatform.Android && Application.platform != RuntimePlatform.WebGLPlayer) LocalURL = "file://" + LocalURL;
         }
@@ -213,7 +219,10 @@ namespace BundleSystem
                 kv.Value.Dispose();
             }
             
+            BuildTarget = localManifest.BuildTarget;
+            BaseRemoteURL = localManifest.RemoteURL;
             RemoteURL = Utility.CombinePath(localManifest.RemoteURL, localManifest.BuildTarget);
+
 #if UNITY_EDITOR
             if (s_EditorBuildSettings.EmulateWithoutRemoteURL)
                 RemoteURL = "file://" + Utility.CombinePath(s_EditorBuildSettings.RemoteOutputPath, UnityEditor.EditorUserBuildSettings.activeBuildTarget.ToString());
@@ -232,14 +241,14 @@ namespace BundleSystem
             return AssetbundleBuildManifest.TryParse(PlayerPrefs.GetString("CachedManifest", string.Empty), out manifest);
         }
 
-        public static BundleAsyncOperation<AssetbundleBuildManifest> GetManifest()
+        public static BundleAsyncOperation<AssetbundleBuildManifest> GetManifest(string subBundle = null)
         {
             var result = new BundleAsyncOperation<AssetbundleBuildManifest>();
-            s_Helper.StartCoroutine(CoGetManifest(result));
+            s_Helper.StartCoroutine(CoGetManifest(result, subBundle));
             return result;
         }
 
-        static IEnumerator CoGetManifest(BundleAsyncOperation<AssetbundleBuildManifest> result)
+        static IEnumerator CoGetManifest(BundleAsyncOperation<AssetbundleBuildManifest> result, string subBundle = null)
         {
             if (!Initialized)
             {
@@ -256,8 +265,13 @@ namespace BundleSystem
                 yield break;
             }
 #endif
+            var url = RemoteURL;
 
-            var manifestReq = UnityWebRequest.Get(Utility.CombinePath(RemoteURL, AssetbundleBuildSettings.ManifestFileName).Replace('\\', '/'));
+            if (subBundle != null) url = Utility.CombinePath(BaseRemoteURL, subBundle, BuildTarget);
+            
+            Debug.Log("URL: " + url);
+
+            var manifestReq = UnityWebRequest.Get(Utility.CombinePath(url, AssetbundleBuildSettings.ManifestFileName).Replace('\\', '/'));
             yield return manifestReq.SendWebRequest();
 
             if(result.IsCancelled)
@@ -365,7 +379,9 @@ namespace BundleSystem
                 var isCached = Caching.IsVersionCached(bundleInfo.AsCached);
                 result.SetCachedBundle(isCached);
 
-                var loadURL = islocalBundle ? Utility.CombinePath(LocalURL, bundleInfo.BundleName) : Utility.CombinePath(RemoteURL, bundleInfo.BundleName);
+                var remoteUrl = Path.Combine(manifest.RemoteURL, manifest.BuildTarget);
+
+                var loadURL = islocalBundle ? Utility.CombinePath(LocalURL, bundleInfo.BundleName) : Utility.CombinePath(remoteUrl, bundleInfo.BundleName);
                 if (LogMessages) Debug.Log($"Loading Bundle Name : {bundleInfo.BundleName}, loadURL {loadURL}, isLocalBundle : {islocalBundle}, isCached {isCached}");
                 LoadedBundle previousBundle;
 
@@ -376,6 +392,7 @@ namespace BundleSystem
                 else
                 {
                     var bundleReq = islocalBundle ? UnityWebRequestAssetBundle.GetAssetBundle(loadURL) : UnityWebRequestAssetBundle.GetAssetBundle(loadURL, bundleInfo.AsCached);
+
                     var operation = bundleReq.SendWebRequest();
                     while (!bundleReq.isDone)
                     {
@@ -447,7 +464,7 @@ namespace BundleSystem
             }
 
             if (LogMessages) Debug.Log($"CacheUsed Before Cleanup : {Caching.defaultCache.spaceOccupied} bytes");
-            Caching.ClearCache(600); //as we bumped entire list right before clear, let it be just 600
+            // Caching.ClearCache(600); //as we bumped entire list right before clear, let it be just 600
             if (LogMessages) Debug.Log($"CacheUsed After CleanUp : {Caching.defaultCache.spaceOccupied} bytes");
 
             PlayerPrefs.SetString("CachedManifest", JsonUtility.ToJson(manifest));
